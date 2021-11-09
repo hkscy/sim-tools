@@ -24,6 +24,7 @@
 #
 # December 2014, Dieter Spaar: add OTA security for sysmoSIM SJS1
 # December 2019, Dieter Spaar: sysmocom ISIM
+# August 2021, Chris Hicks: Added uicc tooolkit support
 
 from pySim.commands import SimCardCommands
 from pySim.utils import swap_nibbles, rpad, b2h, i2h, h2i
@@ -257,14 +258,14 @@ class AppLoaderCommands(object):
 		return self.send_wrapped_apdu_checksw(apdu)
 
 	def load_aid_raw(self, aid, executable, codeSize, volatileDataSize = 0, nonvolatileDataSize = 0):
-		#print "-- codeSize = %d (0x%X)" % (codeSize, codeSize)
+		print "-- codeSize = %d (0x%X)" % (codeSize, codeSize)
 
-		loadParameters = 'c602' + ('%04x' % codeSize)
+		loadParameters = 'c602' + ('%04x' % codeSize)									# -- "Non volatile code space limit" (Tag 'C6')
 		if volatileDataSize > 0:
-			loadParameters = loadParameters + 'c702' ('%04x' % volatileDataSize)
+			loadParameters = loadParameters + 'c702' ('%04x' % volatileDataSize)		# -- "Volatile data space limit" (Tag 'C7')
 		if nonvolatileDataSize > 0:
-			loadParameters = loadParameters + 'c802' ('%04x' % nonvolatileDataSize)
-		loadParameters = 'ef' + ('%02x' % (len(loadParameters) / 2)) + loadParameters
+			loadParameters = loadParameters + 'c802' ('%04x' % nonvolatileDataSize) 	# -- "Non volatile data space limit" (Tag 'C8')
+		loadParameters = 'ef' + ('%02x' % (len(loadParameters) / 2)) + loadParameters 	# -- "System Specific Parameters" (Tag 'EF') 
 		
 		# Install for load APDU, no security domain or hash specified
 		data = ('%02x' % (len(aid) / 2)) + aid + '0000' + ('%02x' % (len(loadParameters) / 2)) + loadParameters + '0000'
@@ -366,6 +367,7 @@ class AppLoaderCommands(object):
 	def load_app(self, capfile):
 		data = self.generate_load_file(capfile)
 		aid = self.get_aid_from_load_file(data)
+		print 'aid: ' + aid
 		self.load_aid_raw(aid, data, len(data) / 2)
 
 	def install_app(self, args):
@@ -374,6 +376,21 @@ class AppLoaderCommands(object):
 
 		toolkit_params = ''
 		if args.enable_sim_toolkit:
+			# The SIM file access and toolkit parameters are mandatory for applications using the sim.toolkit.ToolkitInterface
+			# or sim.access.SIMView interface as defined in TS 143 019
+			#Length of Access Domain field
+			#Access Domain
+			#Priority level of the Toolkit application instance
+			#Maximum number of timers allowed for this application instance Maximum text length for a menu entry
+			#Maximum number of menu entries allowed for this application instance
+			#Position of the first menu entry
+			#Identifier of the first menu entry ('00' means do not care)
+			#....
+			#Position of the last menu entry
+			#Identifier of the last menu entry ('00' means do not care) Maximum number of channels for this application instance Length of Minimum Security Level field
+			#Minimum Security Level (MSL)
+			#Length of TAR Value(s) field
+			#TAR Value(s) of the Toolkit Application instance
 			assert len(args.access_domain) % 2 == 0
 			assert len(args.priority_level) == 2
 			toolkit_params = ('%02x' % (len(args.access_domain) / 2))  + args.access_domain
@@ -384,13 +401,70 @@ class AppLoaderCommands(object):
 				assert len(args.tar) % 6 == 0
 				toolkit_params = toolkit_params + ('%02x' % (len(args.tar) / 2)) + args.tar
 			toolkit_params = 'ca' + ('%02x' % (len(toolkit_params) / 2)) + toolkit_params
+			print toolkit_params
+
+		elif args.enable_uicc_toolkit:
+			# The UICC toolkit parameters are mandatory for applications using the uicc.toolkit.ToolkitInterface defined in TS 102 241
+			# ETSI TS 102 226 defines:
+			# Length, Value
+			# 1, Priority level of the Toolkit application instance
+			# 1, Maximum number of timers allowed for this application instance 
+			# 1, Maximum text length for a menu entry
+			# 1, Maximum number of menu entries allowed for this application instance
+			# 1, Position of the first menu entry
+			# 1, Identifier of the first menu entry ('00' means do not care)
+			# ....
+			# 1, Position of the last menu entry
+			# 1, Identifier of the last menu entry ('00' means do not care) 
+			# 1, Maximum number of channels for this application instance
+			# 1, Length of Minimum Security Level field  
+			# 0-q, Minimum Security Level (MSL) 
+			# 1, Length of TAR Value(s) field
+			# 3*y, TAR Value(s) of the Toolkit Application instance
+			# 1, Maximum number of services for this application instance **
+			max_channels = 0
+			max_services = 1
+			assert len(args.priority_level) == 2
+			toolkit_params = args.priority_level + ('%02x' % args.max_timers)
+			toolkit_params = toolkit_params + ('%02x' % args.max_menu_entry_text)
+			toolkit_params = toolkit_params + ('%02x' % args.max_menu_entries) + '0000' * args.max_menu_entries
+			toolkit_params = toolkit_params + ('%02x' % max_channels) + '00' #0 length of MSL field
+			if args.tar:
+				assert len(args.tar) % 6 == 0
+				toolkit_params = toolkit_params + ('%02x' % (len(args.tar) / 2)) + args.tar + ('%02x' % max_services) 
+			toolkit_params = '80' + ('%02x' % (len(toolkit_params) / 2)) + toolkit_params # Add tag of UICC Toolkit Application specific parameters field
+			print toolkit_params
+
+		if args.enable_uicc_toolkit and args.enable_uicc_file_access:
+			# The UICC access parameters are applicable to applications using the uicc.access.FileView
+			# ETSI TS 102 226 defines:
+			# Length, Value
+			# 1, 		Length of UICC file system AID
+			# 0, 		Empty UICC file system AID
+			# 1,		Length of Access Domain for UICC file system
+			# n,		Access Domain for UICC file system
+			# ...
+			# In case of UICC shared File system, the Length of File System AID is 0 and the File System AID is not present. 
+			access_params = '00' + ('%02x' % (len(args.access_domain) / 2))  + args.access_domain
+			# Add Tag of UICC Access Application specific parameters field (81)
+			toolkit_params = toolkit_params + '81' + ('%02x' % (len(access_params) / 2)) + access_params
+
+			# The UICC Administrative access parameters are applicable to applications using the uicc.access.fileadministration.AdminFileView
+			# Parameters same as for access.  ('%02x' % (len(args.'access_domain') / 2))
+			admin_params = '00' + ('%02x' % (len(args.access_domain) / 2)) + args.access_domain
+			toolkit_params = toolkit_params + '82' + ('%02x' % (len(admin_params) / 2)) + admin_params
+
+			print toolkit_params
+
 
 		assert len(args.nonvolatile_memory_required) == 4
 		assert len(args.volatile_memory_for_install) == 4
 		parameters = 'c802' + args.nonvolatile_memory_required + 'c702' + args.volatile_memory_for_install
 		if toolkit_params:
 			parameters = parameters + toolkit_params
-		parameters = 'ef' + ('%02x' % (len(parameters) / 2)) + parameters + 'c9' + ('%02x' % (len(args.app_parameters) / 2)) + args.app_parameters
+
+		# The "UICC System Specific Parameters" TLV object (Tag 'EA'
+		parameters = 'ea' + ('%02x' % (len(parameters) / 2)) + parameters + 'c9' + ('%02x' % (len(args.app_parameters) / 2)) + args.app_parameters
 		
 		data = ('%02x' % (len(aid) / 2)) + aid + ('%02x' % (len(args.module_aid) / 2)) + args.module_aid + ('%02x' % (len(args.instance_aid) / 2)) + \
 			   args.instance_aid + '0100' + ('%02x' % (len(parameters) / 2)) + parameters + '00'
@@ -408,6 +482,8 @@ parser.add_argument('--instance-aid')
 parser.add_argument('--nonvolatile-memory-required', default='0000')
 parser.add_argument('--volatile-memory-for-install', default='0000')
 parser.add_argument('--enable-sim-toolkit', action='store_true')
+parser.add_argument('--enable-uicc-toolkit', action='store_true')
+parser.add_argument('--enable-uicc-file-access', action='store_true')
 parser.add_argument('--access-domain', default='ff')
 parser.add_argument('--priority-level', default='01')
 parser.add_argument('--max-timers', type=int, default=0)

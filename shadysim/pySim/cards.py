@@ -347,5 +347,233 @@ class SysmoUSIMgr1(Card):
 	def erase(self):
 		return
 
+class TaisysSIMoMEVault(UsimCard, IsimCard):
+	"""
+	Taisys SIMoME VAULT
+	"""
+
+	name = 'Taisys-SIMoME-VAULT'
+
+	def __init__(self, ssc):
+		super(TaisysSIMoMEVault, self).__init__(ssc)
+		self._scc.cla_byte = "00"
+		self._scc.sel_ctrl = "0004" #request an FCP
+
+	@classmethod
+	def autodetect(kls, scc):
+		try:
+			# Try card model #1
+			atr = "3B 9F 95 80 3F C3 A0 80 31 E0 73 FE 21 13 63 8D 43 42 83 F0 90 00 34"
+			if scc.get_atr() == toBytes(atr):
+				return kls(scc)
+
+		except:
+			return None
+		return None
+
+	def verify_adm(self, key):
+		# authenticate as ADM using default key (written on the card..)
+		if not key:
+			raise ValueError("Please provide a PIN-ADM as there is no default one")
+		(res, sw) = self._scc.verify_chv(0x0A, key)
+		return sw
+
+	def program(self, p):
+		self.verify_adm(h2b(p['pin_adm']))
+
+		# This type of card does not allow to reprogram the ICCID.
+		# Reprogramming the ICCID would mess up the card os software
+		# license management, so the ICCID must be kept at its factory
+		# setting!
+		if p.get('iccid'):
+			print("Warning: Programming of the ICCID is not implemented for this type of card.")
+
+		# select DF_GSM
+		self._scc.select_path(['7f20'])
+
+		# set Service Provider Name
+		if p.get('name') is not None:
+			self.update_spn(p['name'], True, True)
+
+		# write EF.IMSI
+		if p.get('imsi'):
+			self._scc.update_binary('6f07', enc_imsi(p['imsi']))
+
+		# EF.PLMNsel
+		if p.get('mcc') and p.get('mnc'):
+			sw = self.update_plmnsel(p['mcc'], p['mnc'])
+			if sw != '9000':
+				print("Programming PLMNsel failed with code %s"%sw)
+
+		# EF.PLMNwAcT
+		if p.get('mcc') and p.get('mnc'):
+			sw = self.update_plmn_act(p['mcc'], p['mnc'])
+			if sw != '9000':
+				print("Programming PLMNwAcT failed with code %s"%sw)
+
+		# EF.OPLMNwAcT
+		if p.get('mcc') and p.get('mnc'):
+			sw = self.update_oplmn_act(p['mcc'], p['mnc'])
+			if sw != '9000':
+				print("Programming OPLMNwAcT failed with code %s"%sw)
+
+		# EF.HPLMNwAcT
+		if p.get('mcc') and p.get('mnc'):
+			sw = self.update_hplmn_act(p['mcc'], p['mnc'])
+			if sw != '9000':
+				print("Programming HPLMNwAcT failed with code %s"%sw)
+
+		# EF.AD
+		if (p.get('mcc') and p.get('mnc')) or p.get('opmode'):
+			if p.get('mcc') and p.get('mnc'):
+				mnc = p['mnc']
+			else:
+				mnc = None
+			sw = self.update_ad(mnc=mnc, opmode=p.get('opmode'))
+			if sw != '9000':
+				print("Programming AD failed with code %s"%sw)
+
+		# EF.SMSP
+		if p.get('smsp'):
+			r = self._scc.select_path(['3f00', '7f10'])
+			data, sw = self._scc.update_record('6f42', 1, lpad(p['smsp'], 104), force_len=True)
+
+		# EF.MSISDN
+		# TODO: Alpha Identifier (currently 'ff'O * 20)
+		# TODO: Capability/Configuration1 Record Identifier
+		# TODO: Extension1 Record Identifier
+		if p.get('msisdn') is not None:
+			msisdn = enc_msisdn(p['msisdn'])
+			content = 'ff' * 20 + msisdn
+
+			r = self._scc.select_path(['3f00', '7f10'])
+			data, sw = self._scc.update_record('6F40', 1, content, force_len=True)
+
+		# EF.ACC
+		if p.get('acc'):
+			sw = self.update_acc(p['acc'])
+			if sw != '9000':
+				print("Programming ACC failed with code %s"%sw)
+
+		# Populate AIDs
+		self.read_aids()
+
+		# update EF-SIM_AUTH_KEY (and EF-USIM_AUTH_KEY_2G, which is
+		# hard linked to EF-USIM_AUTH_KEY)
+		self._scc.select_path(['3f00'])
+		self._scc.select_path(['a515'])
+		if p.get('ki'):
+			self._scc.update_binary('6f20', p['ki'], 1)
+		if p.get('opc'):
+			self._scc.update_binary('6f20', p['opc'], 17)
+
+		# update EF-USIM_AUTH_KEY in ADF.ISIM
+		data, sw = self.select_adf_by_aid(adf="isim")
+		if sw == '9000':
+			if p.get('ki'):
+				self._scc.update_binary('af20', p['ki'], 1)
+			if p.get('opc'):
+				self._scc.update_binary('af20', p['opc'], 17)
+
+			# update EF.P-CSCF in ADF.ISIM
+			if self.file_exists(EF_ISIM_ADF_map['PCSCF']):
+				if p.get('pcscf'):
+					sw = self.update_pcscf(p['pcscf'])
+				else:
+					sw = self.update_pcscf("")
+				if sw != '9000':
+					print("Programming P-CSCF failed with code %s"%sw)
+
+
+			# update EF.DOMAIN in ADF.ISIM
+			if self.file_exists(EF_ISIM_ADF_map['DOMAIN']):
+				if p.get('ims_hdomain'):
+					sw = self.update_domain(domain=p['ims_hdomain'])
+				else:
+					sw = self.update_domain()
+
+				if sw != '9000':
+					print("Programming Home Network Domain Name failed with code %s"%sw)
+
+			# update EF.IMPI in ADF.ISIM
+			# TODO: Validate IMPI input
+			if self.file_exists(EF_ISIM_ADF_map['IMPI']):
+				if p.get('impi'):
+					sw = self.update_impi(p['impi'])
+				else:
+					sw = self.update_impi()
+				if sw != '9000':
+					print("Programming IMPI failed with code %s"%sw)
+
+			# update EF.IMPU in ADF.ISIM
+			# TODO: Validate IMPU input
+			# Support multiple IMPU if there is enough space
+			if self.file_exists(EF_ISIM_ADF_map['IMPU']):
+				if p.get('impu'):
+					sw = self.update_impu(p['impu'])
+				else:
+					sw = self.update_impu()
+				if sw != '9000':
+					print("Programming IMPU failed with code %s"%sw)
+
+		data, sw = self.select_adf_by_aid(adf="usim")
+		if sw == '9000':
+			# update EF-USIM_AUTH_KEY in ADF.USIM
+			if p.get('ki'):
+				self._scc.update_binary('af20', p['ki'], 1)
+			if p.get('opc'):
+				self._scc.update_binary('af20', p['opc'], 17)
+
+			# update EF.EHPLMN in ADF.USIM
+			if self.file_exists(EF_USIM_ADF_map['EHPLMN']):
+				if p.get('mcc') and p.get('mnc'):
+					sw = self.update_ehplmn(p['mcc'], p['mnc'])
+					if sw != '9000':
+						print("Programming EHPLMN failed with code %s"%sw)
+
+			# update EF.ePDGId in ADF.USIM
+			if self.file_exists(EF_USIM_ADF_map['ePDGId']):
+				if p.get('epdgid'):
+					sw = self.update_epdgid(p['epdgid'])
+				else:
+					sw = self.update_epdgid("")
+				if sw != '9000':
+					print("Programming ePDGId failed with code %s"%sw)
+
+			# update EF.ePDGSelection in ADF.USIM
+			if self.file_exists(EF_USIM_ADF_map['ePDGSelection']):
+				if p.get('epdgSelection'):
+					epdg_plmn = p['epdgSelection']
+					sw = self.update_ePDGSelection(epdg_plmn[:3], epdg_plmn[3:])
+				else:
+					sw = self.update_ePDGSelection("", "")
+				if sw != '9000':
+					print("Programming ePDGSelection failed with code %s"%sw)
+
+
+			# After successfully programming EF.ePDGId and EF.ePDGSelection,
+			# Set service 106 and 107 as available in EF.UST
+			# Disable service 95, 99, 115 if ISIM application is present
+			if self.file_exists(EF_USIM_ADF_map['UST']):
+				if p.get('epdgSelection') and p.get('epdgid'):
+					sw = self.update_ust(106, 1)
+					if sw != '9000':
+						print("Programming UST failed with code %s"%sw)
+					sw = self.update_ust(107, 1)
+					if sw != '9000':
+						print("Programming UST failed with code %s"%sw)
+
+				sw = self.update_ust(95, 0)
+				if sw != '9000':
+					print("Programming UST failed with code %s"%sw)
+				sw = self.update_ust(99, 0)
+				if sw != '9000':
+					print("Programming UST failed with code %s"%sw)
+				sw = self.update_ust(115, 0)
+				if sw != '9000':
+					print("Programming UST failed with code %s"%sw)
+
+		return
+
 _cards_classes = [ FakeMagicSim, SuperSim, MagicSim, GrcardSim,
-		   SysmoSIMgr1, SysmoUSIMgr1 ]
+		   SysmoSIMgr1, SysmoUSIMgr1, TaisysSIMoMEVault ]
