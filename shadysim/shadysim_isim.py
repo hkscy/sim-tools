@@ -277,11 +277,11 @@ class AppLoaderCommands(object):
 		sizeSent = 0
 		sizeLoadData = len(loadData) / 2
 
-		print "-- size loadData = %d (0x%X)" % (sizeLoadData, sizeLoadData)
+		# print "-- size loadData = %d (0x%X)" % (sizeLoadData, sizeLoadData)
 
-		blockSize = 0x154 #0x88; # in hex chars. Increased block size to support larger applets.
+		blockSize = 0xa6 #0x88; # in hex chars. Increased block size to support larger applets.
 
-		print "-- blockSize in bytes = %d (0x%X)" % (blockSize / 2, blockSize / 2)
+		# print "-- blockSize in bytes = %d (0x%X)" % (blockSize / 2, blockSize / 2)
 
 		while len(loadData):
 			loadBlockSent = loadBlock
@@ -298,7 +298,7 @@ class AppLoaderCommands(object):
 				loadData = ''
 
 			sizeSent = sizeLoadData - (len(loadData) / 2)
-			print "-- loadBlock = %d  sizeSent = %d (0x%X)  size = %d (0x%X)" % (loadBlockSent, sizeSent, sizeSent, size, size)
+			# print "-- loadBlock = %d  sizeSent = %d (0x%X)  size = %d (0x%X)" % (loadBlockSent, sizeSent, sizeSent, size, size)
 
 			self.send_wrapped_apdu_checksw(apdu + '00c0000000')
 	
